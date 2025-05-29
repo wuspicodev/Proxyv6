@@ -22,9 +22,9 @@ install_dependencies() {
   green "Cài đặt gói cần thiết..."
   if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
     apt update
-    apt install -y git build-essential curl net-tools openssl iproute2
+    apt install -y git build-essential curl net-tools openssl iproute2 firewalld ufw iptables
   elif [[ "$OS" == "almalinux" || "$OS" == "centos" || "$OS" == "rhel" ]]; then
-    dnf install -y git gcc make curl net-tools openssl iproute
+    dnf install -y git gcc make curl net-tools openssl iproute firewalld ufw iptables
   else
     red "Hệ điều hành $OS không được hỗ trợ."
     exit 1
@@ -33,13 +33,11 @@ install_dependencies() {
 
 # Lấy prefix IPv6 từ interface
 get_ipv6_prefix() {
-  # Lấy IPv6 global unicast address của interface
   IPV6_FULL=$(ip -6 addr show dev "$INTERFACE" scope global | grep -oP 'inet6 \K[0-9a-f:]+')
   if [[ -z "$IPV6_FULL" ]]; then
     red "Không tìm thấy địa chỉ IPv6 global trên interface $INTERFACE"
     exit 1
   fi
-  # Lấy 4 nhóm đầu tiên (64 bit) làm prefix
   IPV6_PREFIX=$(echo "$IPV6_FULL" | cut -d':' -f1-4 | tr -d '\n')
   echo "$IPV6_PREFIX"
 }
@@ -151,12 +149,6 @@ enable_forwarding() {
   sysctl -p
 }
 
-# Khởi động 3proxy ngay
-start_3proxy() {
-  pkill 3proxy || true
-  /usr/local/3proxy/bin/3proxy /usr/local/3proxy/3proxy.cfg &
-}
-
 # Tạo systemd service cho 3proxy
 create_systemd_service() {
   green "Tạo systemd service cho 3proxy..."
@@ -169,7 +161,7 @@ After=network.target
 ExecStart=/usr/local/3proxy/bin/3proxy /usr/local/3proxy/3proxy.cfg
 Restart=always
 User=root
-LimitNOFILE=65535
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
@@ -178,6 +170,55 @@ EOF
   systemctl daemon-reload
   systemctl enable 3proxy
   systemctl restart 3proxy
+}
+
+# Mở port firewall với firewalld
+open_ports_firewalld() {
+  if systemctl is-active --quiet firewalld; then
+    green "Phát hiện firewalld đang chạy, mở các port proxy..."
+    PORT=$PROXY_PORT_START
+    for _ in $(seq 1 $PROXY_COUNT); do
+      firewall-cmd --permanent --add-port=${PORT}/tcp
+      PORT=$((PORT+1))
+    done
+    firewall-cmd --reload
+  fi
+}
+
+# Mở port firewall với ufw
+open_ports_ufw() {
+  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
+    green "Phát hiện ufw đang bật, mở các port proxy..."
+    PORT=$PROXY_PORT_START
+    for _ in $(seq 1 $PROXY_COUNT); do
+      ufw allow ${PORT}/tcp
+      PORT=$((PORT+1))
+    done
+  fi
+}
+
+# Mở port firewall với iptables
+open_ports_iptables() {
+  if command -v iptables >/dev/null 2>&1; then
+    green "Dùng iptables để mở các port proxy..."
+    PORT=$PROXY_PORT_START
+    for _ in $(seq 1 $PROXY_COUNT); do
+      iptables -I INPUT -p tcp --dport $PORT -j ACCEPT
+      PORT=$((PORT+1))
+    done
+  fi
+}
+
+open_ports() {
+  open_ports_firewalld
+  open_ports_ufw
+  open_ports_iptables
+}
+
+# Khởi động 3proxy ngay
+start_3proxy() {
+  pkill 3proxy || true
+  /usr/local/3proxy/bin/3proxy /usr/local/3proxy/3proxy.cfg &
 }
 
 # Xuất danh sách proxy ra file
@@ -207,6 +248,7 @@ main() {
   enable_forwarding
   generate_ipv6_list
   assign_ipv6
+  open_ports          # <=== Mở port firewall ở đây
   generate_config
   start_3proxy
   create_systemd_service
