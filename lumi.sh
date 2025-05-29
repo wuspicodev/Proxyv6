@@ -1,12 +1,10 @@
 #!/bin/bash
 set -e
 
-# Hàm in màu
 red() { echo -e "\033[31m$*\033[0m"; }
 green() { echo -e "\033[32m$*\033[0m"; }
 yellow() { echo -e "\033[33m$*\033[0m"; }
 
-# Detect OS
 detect_os() {
   if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -17,22 +15,19 @@ detect_os() {
   fi
 }
 
-# Cài đặt gói cần thiết
 install_dependencies() {
   green "Cài đặt gói cần thiết..."
   if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
     apt update
-    apt install -y git build-essential curl net-tools openssl iproute2 firewalld ufw iptables
+    apt install -y git build-essential curl net-tools openssl iproute2 firewalld iptables
   elif [[ "$OS" == "almalinux" || "$OS" == "centos" || "$OS" == "rhel" ]]; then
     dnf install -y git gcc make curl net-tools openssl iproute firewalld iptables
-    # Không cài ufw trên AlmaLinux/CentOS/RHEL
   else
     red "Hệ điều hành $OS không được hỗ trợ."
     exit 1
   fi
 }
 
-# Lấy prefix IPv6 từ interface
 get_ipv6_prefix() {
   IPV6_FULL=$(ip -6 addr show dev "$INTERFACE" scope global | grep -oP 'inet6 \K[0-9a-f:]+')
   if [[ -z "$IPV6_FULL" ]]; then
@@ -43,7 +38,6 @@ get_ipv6_prefix() {
   echo "$IPV6_PREFIX"
 }
 
-# Nhập thông tin tương tác
 interactive_input() {
   echo "Bắt đầu cấu hình proxy IPv6 3proxy"
   read -p "Nhập số lượng proxy (ví dụ 100): " PROXY_COUNT
@@ -71,7 +65,6 @@ interactive_input() {
   fi
 }
 
-# Tải và build 3proxy
 install_3proxy() {
   green "Tải mã nguồn 3proxy mới nhất..."
   rm -rf /opt/3proxy
@@ -97,7 +90,6 @@ install_3proxy() {
   mkdir -p /var/log/3proxy
 }
 
-# Tạo danh sách IPv6 mới random dựa trên prefix
 generate_ipv6_list() {
   IPV6_LIST=()
   for _ in $(seq 1 $PROXY_COUNT); do
@@ -106,7 +98,6 @@ generate_ipv6_list() {
   done
 }
 
-# Gán các địa chỉ IPv6 cho interface (bỏ qua lỗi nếu đã tồn tại)
 assign_ipv6() {
   green "Gán địa chỉ IPv6 cho interface $INTERFACE..."
   for ip in "${IPV6_LIST[@]}"; do
@@ -114,7 +105,6 @@ assign_ipv6() {
   done
 }
 
-# Tạo file config 3proxy
 generate_config() {
   green "Tạo file cấu hình 3proxy..."
   cat <<EOF > /usr/local/3proxy/3proxy.cfg
@@ -141,7 +131,6 @@ EOF
   done
 }
 
-# Bật chuyển tiếp IPv6
 enable_forwarding() {
   green "Bật IPv6 forwarding..."
   if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
@@ -150,7 +139,6 @@ enable_forwarding() {
   sysctl -p
 }
 
-# Tạo systemd service cho 3proxy
 create_systemd_service() {
   green "Tạo systemd service cho 3proxy..."
   cat <<EOF >/etc/systemd/system/3proxy.service
@@ -173,7 +161,6 @@ EOF
   systemctl restart 3proxy
 }
 
-# Mở port firewall với firewalld
 open_ports_firewalld() {
   if systemctl is-active --quiet firewalld; then
     green "Phát hiện firewalld đang chạy, mở các port proxy..."
@@ -186,19 +173,6 @@ open_ports_firewalld() {
   fi
 }
 
-# Mở port firewall với ufw
-open_ports_ufw() {
-  if command -v ufw >/dev/null 2>&1 && ufw status | grep -q "Status: active"; then
-    green "Phát hiện ufw đang bật, mở các port proxy..."
-    PORT=$PROXY_PORT_START
-    for _ in $(seq 1 $PROXY_COUNT); do
-      ufw allow ${PORT}/tcp
-      PORT=$((PORT+1))
-    done
-  fi
-}
-
-# Mở port firewall với iptables
 open_ports_iptables() {
   if command -v iptables >/dev/null 2>&1; then
     green "Dùng iptables để mở các port proxy..."
@@ -212,17 +186,14 @@ open_ports_iptables() {
 
 open_ports() {
   open_ports_firewalld
-  open_ports_ufw
   open_ports_iptables
 }
 
-# Khởi động 3proxy ngay
 start_3proxy() {
   pkill 3proxy || true
   /usr/local/3proxy/bin/3proxy /usr/local/3proxy/3proxy.cfg &
 }
 
-# Xuất danh sách proxy ra file
 export_proxy_list() {
   echo "Xuất danh sách proxy ra proxy.txt..."
   PORT=$PROXY_PORT_START
@@ -240,7 +211,6 @@ export_proxy_list() {
   green "Danh sách proxy đã lưu vào proxy.txt"
 }
 
-# Main
 main() {
   detect_os
   install_dependencies
@@ -249,7 +219,7 @@ main() {
   enable_forwarding
   generate_ipv6_list
   assign_ipv6
-  open_ports          # <=== Mở port firewall ở đây
+  open_ports
   generate_config
   start_3proxy
   create_systemd_service
