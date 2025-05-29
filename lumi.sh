@@ -24,7 +24,8 @@ install_dependencies() {
     apt update
     apt install -y git build-essential curl net-tools openssl iproute2 firewalld ufw iptables
   elif [[ "$OS" == "almalinux" || "$OS" == "centos" || "$OS" == "rhel" ]]; then
-    dnf install -y git gcc make curl net-tools openssl iproute firewalld ufw iptables
+    dnf install -y git gcc make curl net-tools openssl iproute firewalld iptables
+    # Không cài ufw trên AlmaLinux/CentOS/RHEL
   else
     red "Hệ điều hành $OS không được hỗ trợ."
     exit 1
