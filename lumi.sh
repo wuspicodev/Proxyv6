@@ -1,5 +1,4 @@
 #!/bin/bash
-
 set -e
 
 # Hàm in màu
@@ -7,7 +6,7 @@ red() { echo -e "\033[31m$*\033[0m"; }
 green() { echo -e "\033[32m$*\033[0m"; }
 yellow() { echo -e "\033[33m$*\033[0m"; }
 
-# ------------ HỖ TRỢ NHẬN BIẾT HỆ ĐIỀU HÀNH ------------
+# Detect OS
 detect_os() {
   if [ -f /etc/os-release ]; then
     . /etc/os-release
@@ -18,21 +17,34 @@ detect_os() {
   fi
 }
 
-# ------------ CÀI ĐẶT THƯ VIỆN CẦN THIẾT ------------
+# Cài đặt gói cần thiết
 install_dependencies() {
   green "Cài đặt gói cần thiết..."
   if [[ "$OS" == "ubuntu" || "$OS" == "debian" ]]; then
     apt update
-    apt install -y git build-essential curl net-tools openssl
+    apt install -y git build-essential curl net-tools openssl iproute2
   elif [[ "$OS" == "almalinux" || "$OS" == "centos" || "$OS" == "rhel" ]]; then
-    dnf install -y git gcc make curl net-tools openssl
+    dnf install -y git gcc make curl net-tools openssl iproute
   else
     red "Hệ điều hành $OS không được hỗ trợ."
     exit 1
   fi
 }
 
-# ------------ TƯƠNG TÁC NGƯỜI DÙNG ------------
+# Lấy prefix IPv6 từ interface
+get_ipv6_prefix() {
+  # Lấy IPv6 global unicast address của interface
+  IPV6_FULL=$(ip -6 addr show dev "$INTERFACE" scope global | grep -oP 'inet6 \K[0-9a-f:]+')
+  if [[ -z "$IPV6_FULL" ]]; then
+    red "Không tìm thấy địa chỉ IPv6 global trên interface $INTERFACE"
+    exit 1
+  fi
+  # Lấy 4 nhóm đầu tiên (64 bit) làm prefix
+  IPV6_PREFIX=$(echo "$IPV6_FULL" | cut -d':' -f1-4 | tr -d '\n')
+  echo "$IPV6_PREFIX"
+}
+
+# Nhập thông tin tương tác
 interactive_input() {
   echo "Bắt đầu cấu hình proxy IPv6 3proxy"
   read -p "Nhập số lượng proxy (ví dụ 100): " PROXY_COUNT
@@ -41,14 +53,12 @@ interactive_input() {
   read -p "Nhập port bắt đầu (ví dụ 30000): " PROXY_PORT_START
   PROXY_PORT_START=${PROXY_PORT_START:-30000}
 
-  read -p "Nhập prefix IPv6 (ví dụ 2001:db8:abcd:0012): " IPV6_PREFIX
-  while [[ ! $IPV6_PREFIX =~ ^([0-9a-fA-F]{1,4}:){3,7}[0-9a-fA-F]{0,4}$ ]]; do
-    echo "Prefix IPv6 không hợp lệ. Nhập lại."
-    read -p "Prefix IPv6: " IPV6_PREFIX
-  done
-
   read -p "Nhập interface mạng (ví dụ eth0): " INTERFACE
   INTERFACE=${INTERFACE:-eth0}
+
+  green "Đang lấy prefix IPv6 trên interface $INTERFACE..."
+  IPV6_PREFIX=$(get_ipv6_prefix)
+  green "Đã tự động lấy prefix IPv6: $IPV6_PREFIX"
 
   read -p "Có yêu cầu user:pass cho proxy không? (yes/no): " ENABLE_AUTH
   while [[ ! "$ENABLE_AUTH" =~ ^(yes|no)$ ]]; do
@@ -62,7 +72,7 @@ interactive_input() {
   fi
 }
 
-# ------------ TẢI VÀ BUILD 3PROXY ------------
+# Tải và build 3proxy
 install_3proxy() {
   green "Tải mã nguồn 3proxy mới nhất..."
   rm -rf /opt/3proxy
@@ -70,7 +80,6 @@ install_3proxy() {
 
   cd /opt/3proxy || exit 1
 
-  # Kiểm tra và sử dụng đúng Makefile
   if [ -f Makefile.Linux ]; then
     green "Bắt đầu build 3proxy với Makefile.Linux"
     make -f Makefile.Linux
@@ -89,23 +98,26 @@ install_3proxy() {
   mkdir -p /var/log/3proxy
 }
 
-# ------------ TẠO DANH SÁCH IPV6 ------------
+# Tạo danh sách IPv6 mới random dựa trên prefix
 generate_ipv6_list() {
+  IPV6_LIST=()
   for _ in $(seq 1 $PROXY_COUNT); do
-    # Tạo IPv6 random dựa trên prefix
-    echo "$IPV6_PREFIX:$(openssl rand -hex 2):$(openssl rand -hex 2):$(openssl rand -hex 2):$(openssl rand -hex 2)"
+    ip="$IPV6_PREFIX:$(openssl rand -hex 2):$(openssl rand -hex 2):$(openssl rand -hex 2):$(openssl rand -hex 2)"
+    IPV6_LIST+=("$ip")
   done
 }
 
-# ------------ GÁN IPv6 CHO INTERFACE ------------
+# Gán các địa chỉ IPv6 cho interface (bỏ qua lỗi nếu đã tồn tại)
 assign_ipv6() {
+  green "Gán địa chỉ IPv6 cho interface $INTERFACE..."
   for ip in "${IPV6_LIST[@]}"; do
     ip -6 addr add "$ip/64" dev "$INTERFACE" || true
   done
 }
 
-# ------------ TẠO FILE CẤU HÌNH 3PROXY ------------
+# Tạo file config 3proxy
 generate_config() {
+  green "Tạo file cấu hình 3proxy..."
   cat <<EOF > /usr/local/3proxy/3proxy.cfg
 daemon
 maxconn 2000
@@ -122,7 +134,7 @@ EOF
   fi
 
   PORT=$PROXY_PORT_START
-  LOCAL_IP=$(curl -s ipv4.icanhazip.com)
+  LOCAL_IP=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
 
   for ip in "${IPV6_LIST[@]}"; do
     echo "proxy -6 -n -a -p$PORT -i$LOCAL_IP -e$ip" >> /usr/local/3proxy/3proxy.cfg
@@ -130,22 +142,24 @@ EOF
   done
 }
 
-# ------------ KÍCH HOẠT FORWARD IPV6 ------------
+# Bật chuyển tiếp IPv6
 enable_forwarding() {
+  green "Bật IPv6 forwarding..."
   if ! grep -q "net.ipv6.conf.all.forwarding=1" /etc/sysctl.conf; then
     echo "net.ipv6.conf.all.forwarding=1" >> /etc/sysctl.conf
   fi
   sysctl -p
 }
 
-# ------------ KHỞI ĐỘNG 3PROXY ------------
+# Khởi động 3proxy ngay
 start_3proxy() {
   pkill 3proxy || true
   /usr/local/3proxy/bin/3proxy /usr/local/3proxy/3proxy.cfg &
 }
 
-# ------------ TẠO SYSTEMD SERVICE ------------
+# Tạo systemd service cho 3proxy
 create_systemd_service() {
+  green "Tạo systemd service cho 3proxy..."
   cat <<EOF >/etc/systemd/system/3proxy.service
 [Unit]
 Description=3proxy IPv6 Proxy Server
@@ -164,15 +178,15 @@ EOF
   systemctl daemon-reload
   systemctl enable 3proxy
   systemctl restart 3proxy
-  green "Đã tạo và khởi động systemd service 3proxy"
 }
 
-# ------------ XUẤT DANH SÁCH PROXY ------------
+# Xuất danh sách proxy ra file
 export_proxy_list() {
-  echo "Danh sách proxy IPv6:" > proxy.txt
+  echo "Xuất danh sách proxy ra proxy.txt..."
   PORT=$PROXY_PORT_START
-  LOCAL_IP=$(curl -s ipv4.icanhazip.com)
+  LOCAL_IP=$(curl -s ipv4.icanhazip.com || echo "127.0.0.1")
 
+  echo "Danh sách proxy IPv6:" > proxy.txt
   for ip in "${IPV6_LIST[@]}"; do
     if [ "$ENABLE_AUTH" == "yes" ]; then
       echo "$LOCAL_IP:$PORT:$PROXY_USER:$PROXY_PASS" >> proxy.txt
@@ -184,20 +198,19 @@ export_proxy_list() {
   green "Danh sách proxy đã lưu vào proxy.txt"
 }
 
-# ------------ CHẠY CHƯƠNG TRÌNH ------------
+# Main
 main() {
   detect_os
   install_dependencies
   interactive_input
   install_3proxy
   enable_forwarding
-  readarray -t IPV6_LIST < <(generate_ipv6_list)
+  generate_ipv6_list
   assign_ipv6
   generate_config
   start_3proxy
   create_systemd_service
   export_proxy_list
-
   green "🎉 Cài đặt và cấu hình proxy IPv6 3proxy hoàn tất!"
 }
 
